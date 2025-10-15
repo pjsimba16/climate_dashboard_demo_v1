@@ -118,63 +118,7 @@ def _read_availability_snapshot():
                 pass
     return None
 
-# --- availability snapshot loader: local first, then HF fallback ---
-import os
-from pathlib import Path
 
-def _read_availability_snapshot_local():
-    """Look for the snapshot next to this file and in common folders."""
-    here = Path(__file__).parent.resolve()
-    candidates = [
-        here / "availability_snapshot.parquet",  # <-- same folder as Home_Page.py
-        here / "data" / "availability_snapshot.parquet",
-        here / "parquet" / "availability_snapshot.parquet",
-        here / "availability_snapshot.csv",
-        here / "data" / "availability_snapshot.csv",
-    ]
-    for p in candidates:
-        if p.exists():
-            try:
-                snap = pd.read_parquet(p) if p.suffix.lower() == ".parquet" else pd.read_csv(p)
-                st.caption(f"Loaded availability snapshot from: {p}")
-                return snap
-            except Exception as e:
-                st.caption(f"Found snapshot at {p} but failed to read: {e}")
-    return None
-
-@st.cache_data(ttl=24*3600, show_spinner=False)
-def _read_availability_snapshot_hf(
-    filename_parquet="availability_snapshot.parquet",
-    filename_csv="availability_snapshot.csv",
-    repo_id=HF_REPO_ID,
-    repo_type=HF_REPO_TYPE,
-):
-    """Try to pull the snapshot from Hugging Face if it's not bundled."""
-    token = _get_hf_token()
-    # Prefer parquet in /parquet/
-    try:
-        p = hf_hub_download(repo_id=repo_id, repo_type=repo_type,
-                            filename=f"parquet/{filename_parquet}", token=token)
-        return pd.read_parquet(p)
-    except Exception:
-        pass
-    # Fallback to CSV in /data/ or repo root
-    for fname in (f"data/{filename_csv}", filename_csv):
-        try:
-            p = hf_hub_download(repo_id=repo_id, repo_type=repo_type, filename=fname, token=token)
-            return pd.read_csv(p)
-        except Exception:
-            continue
-    return None
-
-def _load_availability_snapshot():
-    snap = _read_availability_snapshot_local()
-    if snap is not None:
-        return snap, "snapshot (local)"
-    snap = _read_availability_snapshot_hf()
-    if snap is not None:
-        return snap, "snapshot (HF)"
-    return None, None
 
 
 # --- Hugging Face data loader (unchanged behavior, just organized) ---
@@ -242,6 +186,64 @@ def load_many_from_hf(files: Dict[str, str],
                       repo_type: str = HF_REPO_TYPE,
                       **read_kwargs) -> Dict[str, pd.DataFrame]:
     return {k: read_hf_table(v, repo_id=repo_id, repo_type=repo_type, **read_kwargs) for k, v in files.items()}
+
+# --- availability snapshot loader: local first, then HF fallback ---
+import os
+from pathlib import Path
+
+def _read_availability_snapshot_local():
+    """Look for the snapshot next to this file and in common folders."""
+    here = Path(__file__).parent.resolve()
+    candidates = [
+        here / "availability_snapshot.parquet",  # <-- same folder as Home_Page.py
+        here / "data" / "availability_snapshot.parquet",
+        here / "parquet" / "availability_snapshot.parquet",
+        here / "availability_snapshot.csv",
+        here / "data" / "availability_snapshot.csv",
+    ]
+    for p in candidates:
+        if p.exists():
+            try:
+                snap = pd.read_parquet(p) if p.suffix.lower() == ".parquet" else pd.read_csv(p)
+                st.caption(f"Loaded availability snapshot from: {p}")
+                return snap
+            except Exception as e:
+                st.caption(f"Found snapshot at {p} but failed to read: {e}")
+    return None
+
+@st.cache_data(ttl=24*3600, show_spinner=False)
+def _read_availability_snapshot_hf(
+    filename_parquet="availability_snapshot.parquet",
+    filename_csv="availability_snapshot.csv",
+    repo_id=HF_REPO_ID,
+    repo_type=HF_REPO_TYPE,
+):
+    """Try to pull the snapshot from Hugging Face if it's not bundled."""
+    token = _get_hf_token()
+    # Prefer parquet in /parquet/
+    try:
+        p = hf_hub_download(repo_id=repo_id, repo_type=repo_type,
+                            filename=f"parquet/{filename_parquet}", token=token)
+        return pd.read_parquet(p)
+    except Exception:
+        pass
+    # Fallback to CSV in /data/ or repo root
+    for fname in (f"data/{filename_csv}", filename_csv):
+        try:
+            p = hf_hub_download(repo_id=repo_id, repo_type=repo_type, filename=fname, token=token)
+            return pd.read_csv(p)
+        except Exception:
+            continue
+    return None
+
+def _load_availability_snapshot():
+    snap = _read_availability_snapshot_local()
+    if snap is not None:
+        return snap, "snapshot (local)"
+    snap = _read_availability_snapshot_hf()
+    if snap is not None:
+        return snap, "snapshot (HF)"
+    return None, None
 
 # =========================
 # Title & subtitle (preserved)
