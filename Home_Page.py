@@ -4,8 +4,15 @@ import pandas as pd
 import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
-from streamlit_plotly_events import plotly_events
 import streamlit.components.v1 as components
+
+# Try to use the click-events package; fall back gracefully if unavailable
+try:
+    from streamlit_plotly_events import plotly_events
+    PLOTLY_EVENTS_AVAILABLE = True
+except Exception:
+    plotly_events = None
+    PLOTLY_EVENTS_AVAILABLE = False
 
 # =========================
 # Page & global style
@@ -40,18 +47,30 @@ def _find_file(rel_path: str):
             return p
     return None
 
-@st.cache_data(show_spinner=False)
-def _read_csv(fname: str) -> pd.DataFrame:
-    p = _find_file(fname)
-    if not p:
-        return pd.DataFrame()
-    try:
-        return pd.read_csv(p)
-    except Exception:
-        try:
-            return pd.read_csv(p, encoding="latin-1")
-        except Exception:
-            return pd.DataFrame()
+def _read_table(name_or_path: str) -> pd.DataFrame:
+    """
+    Prefer Parquet in ./parquet then CSV in ./ or ./data (kept for local runs).
+    """
+    stem = os.path.splitext(name_or_path)[0]
+    for ext in (".snappy.parquet", ".zstd.parquet", ".parquet"):
+        for base in ("parquet", "."):
+            candidate = os.path.join(base, f"{stem}{ext}")
+            if os.path.exists(candidate):
+                try:
+                    return pd.read_parquet(candidate, engine="pyarrow")
+                except Exception:
+                    pass
+    for ext in (".csv",):
+        p = _find_file(stem + ext)
+        if p:
+            try:
+                return pd.read_csv(p)
+            except Exception:
+                try:
+                    return pd.read_csv(p, encoding="latin-1")
+                except Exception:
+                    pass
+    return pd.DataFrame()
 
 try:
     import pycountry
@@ -82,119 +101,42 @@ def _iso3_col(df: pd.DataFrame):
             return "Country"
     return None
 
-def _find_file(rel_path: str):
-    for base in (".", "data"):
-        p = os.path.join(base, rel_path)
-        if os.path.exists(p):
-            return p
-    return None
-
-def _read_table(name_or_path: str) -> pd.DataFrame:
-    """
-    Smart reader:
-      - If user passes 'country_temperature.csv' → try parquet/country_temperature.parquet (snappy or zstd) first, else CSV file.
-      - If user passes 'country_temperature' (no ext) → same behavior.
-    Looks in './parquet' first, then in '.' and './data'.
-    """
-    stem = os.path.splitext(name_or_path)[0]  # strip extension if any, e.g., 'country_temperature'
-    # 1) Try Parquet in ./parquet (snappy -> zstd)
-    for ext in (".snappy.parquet", ".zstd.parquet", ".parquet"):
-        for base in ("parquet", "."):
-            candidate = os.path.join(base, f"{stem}{ext}")
-            if os.path.exists(candidate):
-                try:
-                    return pd.read_parquet(candidate, engine="pyarrow")
-                except Exception:
-                    pass
-    # 2) Try CSV in '.' or './data'
-    for ext in (".csv",):
-        p = _find_file(stem + ext)
-        if p:
-            try:
-                return pd.read_csv(p)
-            except Exception:
-                try:
-                    return pd.read_csv(p, encoding="latin-1")
-                except Exception:
-                    pass
-    # If all fails
-    return pd.DataFrame()
-
-# --- Hugging Face data loader for Streamlit ---
-# Usage:
-#   df = read_hf_table("country_temperature.parquet")
-#   dfs = load_many_from_hf({
-#       "country_temp": "country_temperature.parquet",
-#       "country_pr":   "country_precipitation.parquet",
-#       "city_temp":    "city_temperature.parquet",
-#       "city_pr":      "city_precipitation.parquet",
-#       "city_mapper":  "city_mapper_with_coords_v2.csv",
-#   })
-
+# --- Hugging Face data loader (unchanged behavior, just organized) ---
 from pathlib import Path
-from typing import Dict, Iterable, Optional
-
-import pandas as pd
-import streamlit as st
+from typing import Dict
 from huggingface_hub import hf_hub_download
 try:
     from huggingface_hub.utils import HfHubHTTPError
 except ImportError:
     from huggingface_hub.errors import HfHubHTTPError
 
-
-
-# Your Space slug (repo ID)
 HF_REPO_ID = "pjsimba16/adb_climate_dashboard_v1"
-HF_REPO_TYPE = "space"  # <- important when files live in a Space (not a Datasets repo)
-
+HF_REPO_TYPE = "space"
 
 def _get_hf_token():
-    """
-    Return an HF token if one is configured, else None.
-    Works locally even when no secrets.toml exists.
-    """
-    # 1) Prefer Streamlit secrets if available (e.g., on Streamlit Cloud)
     try:
-        # Accessing st.secrets can raise if there's no secrets.toml
         if hasattr(st, "secrets") and "HF_TOKEN" in st.secrets:
             return st.secrets["HF_TOKEN"]
     except Exception:
         pass
-
-    # 2) Fallback: environment variable (optional)
     return os.getenv("HF_TOKEN", None)
-
 
 @st.cache_data(ttl=24 * 3600, show_spinner=False)
 def _download_from_hub(filename: str,
                        repo_id: str = HF_REPO_ID,
                        repo_type: str = HF_REPO_TYPE) -> str:
-    """
-    Download a single file from the Hugging Face Hub and return its local cached path.
-    Caches across reruns thanks to HF cache + st.cache_data.
-    """
     token = _get_hf_token()
     try:
-        local_path = hf_hub_download(
+        return hf_hub_download(
             repo_id=repo_id,
             repo_type=repo_type,
             filename=filename,
             token=token,
         )
     except HfHubHTTPError as e:
-        raise FileNotFoundError(
-            f"Could not download '{filename}' from '{repo_id}' ({repo_type}). "
-            f"HTTP error: {e}"
-        )
-    return local_path
-
+        raise FileNotFoundError(f"Could not download '{filename}' from '{repo_id}' ({repo_type}). HTTP: {e}")
 
 def _read_any_table(local_path: str, **read_kwargs) -> pd.DataFrame:
-    """
-    Read a tabular file based on extension.
-    Supports: .parquet, .csv, .feather, .json (records/lines), .tsv
-    """
     ext = Path(local_path).suffix.lower()
     if ext == ".parquet":
         return pd.read_parquet(local_path, **read_kwargs)
@@ -204,58 +146,26 @@ def _read_any_table(local_path: str, **read_kwargs) -> pd.DataFrame:
     if ext == ".feather":
         return pd.read_feather(local_path, **read_kwargs)
     if ext == ".json":
-        # Try JSON lines first; fall back to standard JSON
         try:
             return pd.read_json(local_path, lines=True, **read_kwargs)
         except ValueError:
             return pd.read_json(local_path, **read_kwargs)
     raise ValueError(f"Unsupported file extension for '{local_path}'")
 
-
 @st.cache_data(ttl=24 * 3600)
 def read_hf_table(filename: str,
                   repo_id: str = HF_REPO_ID,
                   repo_type: str = HF_REPO_TYPE,
                   **read_kwargs) -> pd.DataFrame:
-    """
-    High-level helper: download a file from HF Hub (Space or Dataset) and return a DataFrame.
-
-    Parameters
-    ----------
-    filename : str
-        File path inside the repo (e.g., 'country_temperature.parquet').
-    repo_id : str
-        HF repo id, default is your Space 'pjsimba16/adb_climate_dashboard_v1'.
-    repo_type : str
-        'space' (your case) or 'dataset' (if you later move data into a Datasets repo).
-    **read_kwargs :
-        Extra kwargs for pandas readers (e.g., dtype=..., usecols=..., engine=...).
-
-    Returns
-    -------
-    pd.DataFrame
-    """
     local_path = _download_from_hub(filename, repo_id=repo_id, repo_type=repo_type)
     return _read_any_table(local_path, **read_kwargs)
-
 
 @st.cache_data(ttl=24 * 3600)
 def load_many_from_hf(files: Dict[str, str],
                       repo_id: str = HF_REPO_ID,
                       repo_type: str = HF_REPO_TYPE,
                       **read_kwargs) -> Dict[str, pd.DataFrame]:
-    """
-    Convenience: load multiple files at once.
-
-    files : mapping of {key: filename}
-        Example: {'country_temp': 'country_temperature.parquet', ...}
-    Returns mapping {key: DataFrame}
-    """
-    out = {}
-    for key, fname in files.items():
-        out[key] = read_hf_table(fname, repo_id=repo_id, repo_type=repo_type, **read_kwargs)
-    return out
-
+    return {k: read_hf_table(v, repo_id=repo_id, repo_type=repo_type, **read_kwargs) for k, v in files.items()}
 
 # =========================
 # Title & subtitle (preserved)
@@ -265,19 +175,8 @@ st.markdown("<div class='subtitle'>Built and Maintained by Roshen Fernando and P
 st.divider()
 
 # =========================
-# Load availability from current indicators
+# Load availability from current indicators (from HF Space)
 # =========================
-#country_temp = _read_csv("country_temperature.csv")
-#city_temp    = _read_csv("city_temperature.csv")
-#country_prec = _read_csv("country_precipitation.csv")
-#city_prec    = _read_csv("city_precipitation.csv")
-
-#country_temp = _read_table("country_temperature")
-#city_temp    = _read_table("city_temperature")
-#country_prec = _read_table("country_precipitation")
-#city_prec    = _read_table("city_precipitation")
-#df_mapper    = _read_table("city_mapper_with_coords_v2")
-
 FILES = {
     "country_temp": "country_temperature.snappy.parquet",
     "country_pr":   "country_precipitation.snappy.parquet",
@@ -285,17 +184,14 @@ FILES = {
     "city_pr":      "city_precipitation.snappy.parquet",
     "city_mapper":  "city_mapper_with_coords_v2.snappy.parquet",
 }
-
 dfs = load_many_from_hf(FILES)
 country_temp = dfs["country_temp"]
-country_prec   = dfs["country_pr"]
+country_prec = dfs["country_pr"]
 city_temp    = dfs["city_temp"]
-city_prec      = dfs["city_pr"]
-df_mapper     = dfs["city_mapper"]
+city_prec    = dfs["city_pr"]
+df_mapper    = dfs["city_mapper"]
 
-
-
-def _isos_with_indicator(country_df, city_df, country_col_name=None):
+def _isos_with_indicator(country_df, city_df):
     s = set()
     for df in (country_df, city_df):
         if df is None or df.empty:
@@ -310,8 +206,6 @@ def _isos_with_indicator(country_df, city_df, country_col_name=None):
 
 iso_temp = _isos_with_indicator(country_temp, city_temp)
 iso_prec = _isos_with_indicator(country_prec, city_prec)
-
-# Union for coloring the map
 iso_with_data = set().union(iso_temp, iso_prec)
 
 # All countries for the map
@@ -323,7 +217,7 @@ else:
     all_countries = pd.DataFrame({"iso3": sorted(list(iso_with_data))})
     all_countries["name"] = all_countries["iso3"]
 
-# Build indicator badges (for hover)
+# Indicator badges for hover
 def _badges_for_iso(iso3: str):
     tags = []
     if iso3 in iso_temp: tags.append("Temperature")
@@ -358,7 +252,6 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# Quick search (optional jump)
 col_a, col_b = st.columns([0.58, 0.42])
 with col_b:
     quick_opts = ["— Type to search —"] + sorted(all_countries["name"].tolist())
@@ -393,12 +286,11 @@ vp = components.html(
       })();
     </script>
     """,
-    height=0,  # invisible
+    height=0,
 )
 
 if isinstance(vp, dict) and "width" in vp and "height" in vp:
     vw, vh = int(vp["width"]), int(vp["height"])
-    # Height ~ 52% of viewport width, clamped between 540px and 84% of viewport height
     map_h = max(540, min(int(0.52 * vw), int(0.84 * vh)))
 else:
     map_h = 720
@@ -406,22 +298,22 @@ else:
 # =========================
 # World map (neutral style + bolder borders + badges in hover)
 # =========================
-color_vals = all_countries["has_data"].astype(int)  # 0 or 1
+color_vals = all_countries["has_data"].astype(int)
 fig = px.choropleth(
     all_countries,
     locations="iso3",
     locationmode="ISO-3",
     color=color_vals,
-    color_continuous_scale=[[0, "#d4d4d8"], [1, "#12a39a"]],  # neutral grey -> calm teal
+    color_continuous_scale=[[0, "#d4d4d8"], [1, "#12a39a"]],
     hover_name="name",
     hover_data={"iso3": False, "has_data": False, "name": False, "hovertext": False, "badges": False},
     projection="equirectangular",
 )
 
-# Clean, informative hover with badges
+# Attach BOTH hover text and iso3 for robust click parsing
 fig.update_traces(
     hovertemplate="<b>%{customdata[0]}</b><extra></extra>",
-    customdata=all_countries[["hovertext"]]
+    customdata=all_countries[["hovertext", "iso3"]].to_numpy()
 )
 
 fig.update_layout(
@@ -433,13 +325,12 @@ fig.update_layout(
     plot_bgcolor="#f8fafc",
 )
 
-# Distinct country borders + neutral oceans/land
 fig.update_geos(
     fitbounds="locations",
     visible=False,
     showcountries=True,
-    countrycolor="#475569",   # darker slate border
-    countrywidth=1.2,         # <--- bolder borders
+    countrycolor="#475569",
+    countrywidth=1.2,
     showocean=True,
     oceancolor="#eef2f7",
     showland=True,
@@ -447,7 +338,7 @@ fig.update_geos(
     showsubunits=False
 )
 
-# Card wrapper for visual elevation
+# Card wrapper
 st.markdown(
     """
     <div class='map-wrap' style="
@@ -459,17 +350,24 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
-events = plotly_events(
-    fig,
-    click_event=True,
-    hover_event=False,
-    select_event=False,
-    override_height=map_h,
-    override_width="100%",
-)
+
+if PLOTLY_EVENTS_AVAILABLE:
+    events = plotly_events(
+        fig,
+        click_event=True,
+        hover_event=False,
+        select_event=False,
+        override_height=map_h,
+        override_width="100%",
+    )
+else:
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    st.info("Click-to-open is unavailable on this deployment. Use Quick search.", icon="ℹ️")
+    events = []
+
 st.markdown("</div>", unsafe_allow_html=True)
 
-# Status chips below map (mini legend + coverage count)
+# Status chips
 st.markdown(
     f"""
     <div style="display:flex; gap:10px; align-items:center; margin: 10px 4px 6px 2px;">
@@ -490,7 +388,7 @@ st.markdown(
 )
 
 # =========================
-# Click handling: direct navigation (no query-param loop)
+# Click handling: robust ISO3 extraction
 # =========================
 def go_country_page(iso3: str, country_name: str = ""):
     st.session_state["nav_iso3"] = (iso3 or "").upper().strip()
@@ -501,18 +399,30 @@ def go_country_page(iso3: str, country_name: str = ""):
         st.query_params.update({"page": "1 Temperature Dashboard", "iso3": st.session_state["nav_iso3"]})
         st.stop()
 
+clicked_iso3 = None
 if events:
-    pn = events[0].get("pointNumber")
-    if isinstance(pn, int) and 0 <= pn < len(all_countries):
-        clicked_iso3 = all_countries.iloc[pn]["iso3"]
-        clicked_name = all_countries.iloc[pn]["name"]
-        if clicked_iso3 in iso_with_data:
-            go_country_page(clicked_iso3, clicked_name)
-        else:
-            st.info(f"{clicked_name}: No available indicators.", icon="ℹ️")
+    e = events[0]
+    # Preferred: Plotly supplies 'location' (ISO3) for choropleth clicks
+    if "location" in e and isinstance(e["location"], str):
+        clicked_iso3 = e["location"].upper()
+    # Fallback: our customdata second element is iso3
+    elif "customdata" in e and isinstance(e["customdata"], list) and len(e["customdata"]) >= 2:
+        clicked_iso3 = str(e["customdata"][1]).upper()
+    # Last resort: pointNumber → row lookup
+    elif "pointNumber" in e:
+        pn = e["pointNumber"]
+        if isinstance(pn, int) and 0 <= pn < len(all_countries):
+            clicked_iso3 = str(all_countries.iloc[pn]["iso3"]).upper()
+
+if clicked_iso3:
+    if clicked_iso3 in iso_with_data:
+        cname = all_countries.loc[all_countries["iso3"] == clicked_iso3, "name"].iloc[0]
+        go_country_page(clicked_iso3, cname)
+    else:
+        st.info("No available indicators for this country.", icon="ℹ️")
 
 # =========================
-# Footer: logos / acknowledgements / disclaimers / links (preserved)
+# Footer
 # =========================
 st.markdown("""
 <div class="footer-box">
