@@ -422,6 +422,8 @@ fig.update_layout(
     plot_bgcolor="#f8fafc",
 )
 
+fig.update_layout(template=None)
+
 # Card wrapper
 st.markdown(
     """
@@ -435,19 +437,19 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+# --- TEMP: plain plotly to validate colors on Cloud ---
+st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+# --- Then (for clicks) render with the events component below ---
+events = []
 if PLOTLY_EVENTS_AVAILABLE:
     events = plotly_events(
         fig,
-        click_event=True,
-        hover_event=False,
-        select_event=False,
-        override_height=map_h,
-        override_width="100%",
+        click_event=True, hover_event=False, select_event=False,
+        override_height=map_h, override_width="100%",
     )
 else:
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
     st.info("Click-to-open is unavailable on this deployment. Use Quick search.", icon="ℹ️")
-    events = []
 
 st.markdown("</div>", unsafe_allow_html=True)
 
