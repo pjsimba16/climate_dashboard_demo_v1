@@ -101,6 +101,23 @@ def _iso3_col(df: pd.DataFrame):
             return "Country"
     return None
 
+def _read_availability_snapshot():
+    # Check a few common locations (Parquet first)
+    candidates = [
+        "parquet/availability_snapshot.parquet",
+        "data/availability_snapshot.parquet",
+        "availability_snapshot.parquet",
+        "data/availability_snapshot.csv",
+        "availability_snapshot.csv",
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            try:
+                return pd.read_parquet(p) if p.endswith(".parquet") else pd.read_csv(p)
+            except Exception:
+                pass
+    return None
+
 # --- Hugging Face data loader (unchanged behavior, just organized) ---
 from pathlib import Path
 from typing import Dict
@@ -177,36 +194,53 @@ st.divider()
 # =========================
 # Load availability from current indicators (from HF Space)
 # =========================
-FILES = {
-    "country_temp": "country_temperature.snappy.parquet",
-    "country_pr":   "country_precipitation.snappy.parquet",
-    "city_temp":    "city_temperature.snappy.parquet",
-    "city_pr":      "city_precipitation.snappy.parquet",
-    "city_mapper":  "city_mapper_with_coords_v2.snappy.parquet",
-}
-dfs = load_many_from_hf(FILES)
-country_temp = dfs["country_temp"]
-country_prec = dfs["country_pr"]
-city_temp    = dfs["city_temp"]
-city_prec    = dfs["city_pr"]
-df_mapper    = dfs["city_mapper"]
+# =========================
+# Load availability (prefer snapshot; else compute from HF datasets)
+# =========================
+snap = _read_availability_snapshot()
 
-def _isos_with_indicator(country_df, city_df):
-    s = set()
-    for df in (country_df, city_df):
-        if df is None or df.empty:
-            continue
-        icol = _iso3_col(df)
-        if icol:
-            s.update(df[icol].dropna().astype(str).str.upper().str.strip().unique())
-        elif "Country" in df.columns:
-            s.update(df["Country"].dropna().astype(str).map(_to_iso3))
-    s.discard("")
-    return s
+if snap is not None and {"iso3","has_temp","has_prec"} <= set(snap.columns):
+    # --- Fast path: use snapshot; do NOT load the big tables here ---
+    iso_temp = set(snap.loc[snap["has_temp"] == 1, "iso3"].astype(str).str.upper())
+    iso_prec = set(snap.loc[snap["has_prec"] == 1, "iso3"].astype(str).str.upper())
+    iso_with_data = iso_temp | iso_prec
 
-iso_temp = _isos_with_indicator(country_temp, city_temp)
-iso_prec = _isos_with_indicator(country_prec, city_prec)
-iso_with_data = set().union(iso_temp, iso_prec)
+    # Optional: if you still need the mapper later on the home page, load it;
+    # otherwise skip all large downloads on Home to keep it fast.
+    country_temp = country_prec = city_temp = city_prec = pd.DataFrame()
+else:
+    # --- Fallback: compute from the HF datasets (your current behavior) ---
+    FILES = {
+        "country_temp": "country_temperature.snappy.parquet",
+        "country_pr":   "country_precipitation.snappy.parquet",
+        "city_temp":    "city_temperature.snappy.parquet",
+        "city_pr":      "city_precipitation.snappy.parquet",
+        "city_mapper":  "city_mapper_with_coords_v2.snappy.parquet",
+    }
+    dfs = load_many_from_hf(FILES)
+    country_temp = dfs["country_temp"]
+    country_prec = dfs["country_pr"]
+    city_temp    = dfs["city_temp"]
+    city_prec    = dfs["city_pr"]
+    # df_mapper    = dfs["city_mapper"]  # Not needed on Home
+
+    def _isos_with_indicator(country_df, city_df):
+        s = set()
+        for df in (country_df, city_df):
+            if df is None or df.empty:
+                continue
+            icol = _iso3_col(df)
+            if icol:
+                s.update(df[icol].dropna().astype(str).str.upper().str.strip().unique())
+            elif "Country" in df.columns:
+                s.update(df["Country"].dropna().astype(str).map(_to_iso3))
+        s.discard("")
+        return s
+
+    iso_temp = _isos_with_indicator(country_temp, city_temp)
+    iso_prec = _isos_with_indicator(country_prec, city_prec)
+    iso_with_data = set().union(iso_temp, iso_prec)
+
 
 # All countries for the map
 if pycountry:
