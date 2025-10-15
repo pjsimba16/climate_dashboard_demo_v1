@@ -2,8 +2,8 @@
 import os
 import pandas as pd
 import streamlit as st
-import plotly.express as px
 import plotly.graph_objects as go
+import plotly.express as px  # still used for nothing else, but safe to keep
 import streamlit.components.v1 as components
 from pathlib import Path
 
@@ -24,7 +24,6 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# Let the main content take (almost) the full viewport width
 st.markdown("""
 <style>
   .block-container {
@@ -49,9 +48,6 @@ def _find_file(rel_path: str):
     return None
 
 def _read_table(name_or_path: str) -> pd.DataFrame:
-    """
-    Prefer Parquet in ./parquet then CSV in ./ or ./data (kept for local runs).
-    """
     stem = os.path.splitext(name_or_path)[0]
     for ext in (".snappy.parquet", ".zstd.parquet", ".parquet"):
         for base in ("parquet", "."):
@@ -102,7 +98,7 @@ def _iso3_col(df: pd.DataFrame):
             return "Country"
     return None
 
-# --- Hugging Face data loader (same as before) ---
+# --- Hugging Face data loader ---
 from typing import Dict
 from huggingface_hub import hf_hub_download
 try:
@@ -172,7 +168,7 @@ def _read_availability_snapshot_local():
     """Look for the snapshot next to this file and in common folders."""
     here = Path(__file__).parent.resolve()
     candidates = [
-        here / "availability_snapshot.parquet",  # same folder as Home_Page.py
+        here / "availability_snapshot.parquet",
         here / "data" / "availability_snapshot.parquet",
         here / "parquet" / "availability_snapshot.parquet",
         here / "availability_snapshot.csv",
@@ -195,7 +191,6 @@ def _read_availability_snapshot_hf(
     repo_id=HF_REPO_ID,
     repo_type=HF_REPO_TYPE,
 ):
-    """Try to pull the snapshot from Hugging Face if it's not bundled."""
     token = _get_hf_token()
     # Prefer parquet in /parquet/
     try:
@@ -235,14 +230,11 @@ st.divider()
 snap, snap_origin = _load_availability_snapshot()
 
 if snap is not None and {"iso3","has_temp","has_prec"} <= set(snap.columns):
-    # Fast path: use snapshot; skip heavy downloads on Home
     iso_temp = set(snap.loc[snap["has_temp"] == 1, "iso3"].astype(str).str.upper())
     iso_prec = set(snap.loc[snap["has_prec"] == 1, "iso3"].astype(str).str.upper())
     iso_with_data = iso_temp | iso_prec
-    # placeholders (not used further on Home)
     country_temp = country_prec = city_temp = city_prec = pd.DataFrame()
 else:
-    # Fallback: compute from the HF datasets (slower)
     FILES = {
         "country_temp": "country_temperature.snappy.parquet",
         "country_pr":   "country_precipitation.snappy.parquet",
@@ -273,7 +265,6 @@ else:
     iso_with_data = iso_temp | iso_prec
     snap_origin = "computed (HF)"
 
-# Small badge so you can confirm which path was used
 st.caption(f"Availability source: {snap_origin or 'computed (HF)'}")
 
 # Sidebar debug (availability)
@@ -300,6 +291,7 @@ def _badges_for_iso(iso3: str):
     if iso3 in iso_prec: tags.append("Precipitation")
     return " • ".join(tags)
 
+all_countries["iso3"]      = all_countries["iso3"].astype(str).str.upper().str.strip()
 all_countries["has_data"]  = all_countries["iso3"].isin(iso_with_data)
 all_countries["badges"]    = all_countries["iso3"].map(_badges_for_iso)
 all_countries["hovertext"] = all_countries.apply(
@@ -307,9 +299,6 @@ all_countries["hovertext"] = all_countries.apply(
               else (f"{r['name']}<br><span>No available indicators</span>"),
     axis=1
 )
-
-# >>> Patch 1: make an explicit numeric color column and normalize locations
-all_countries["iso3"] = all_countries["iso3"].astype(str).str.upper().str.strip()
 all_countries["val"]  = all_countries["has_data"].astype("int8")  # 0/1
 
 # Optional color debug
@@ -380,36 +369,28 @@ else:
     map_h = 720
 
 # =========================
-# World map (neutral style + bolder borders + badges in hover)
-# >>> Patch 2: use the explicit column and force range_color=(0,1)
+# World map using go.Choropleth (explicit zmin/zmax)
 # =========================
-fig = px.choropleth(
-    all_countries,
-    locations="iso3",
+fig = go.Figure()
+
+# Choropleth layer
+fig.add_trace(go.Choropleth(
+    locations=all_countries["iso3"],
+    z=all_countries["val"].astype(float),  # numeric 0/1
     locationmode="ISO-3",
-    color="val",                                 # use named 0/1 column
-    range_color=(0, 1),                          # force 0..1 range
-    color_continuous_scale=[[0, "#d4d4d8"], [1, "#12a39a"]],
-    hover_name="name",
-    hover_data={"iso3": False, "has_data": False, "name": False, "hovertext": False, "badges": False, "val": False},
-    projection="equirectangular",
-)
-
-# Attach BOTH hover text and iso3 for robust click parsing
-fig.update_traces(
+    colorscale=[[0.0, "#d4d4d8"], [1.0, "#12a39a"]],
+    zmin=0.0, zmax=1.0,
+    autocolorscale=False,
+    showscale=False,
+    hoverinfo="text",
+    text=all_countries["hovertext"],
+    customdata=all_countries[["hovertext", "iso3"]].to_numpy(),
     hovertemplate="<b>%{customdata[0]}</b><extra></extra>",
-    customdata=all_countries[["hovertext", "iso3"]].to_numpy()
-)
+    marker_line_color="#475569",
+    marker_line_width=1.2,
+))
 
-fig.update_layout(
-    coloraxis_showscale=False,
-    height=map_h,
-    autosize=True,
-    margin=dict(l=0, r=0, t=0, b=0),
-    paper_bgcolor="#f8fafc",
-    plot_bgcolor="#f8fafc",
-)
-
+# Geo & layout styling
 fig.update_geos(
     fitbounds="locations",
     visible=False,
@@ -421,6 +402,12 @@ fig.update_geos(
     showland=True,
     landcolor="#f8fafc",
     showsubunits=False
+)
+fig.update_layout(
+    height=map_h,
+    margin=dict(l=0, r=0, t=0, b=0),
+    paper_bgcolor="#f8fafc",
+    plot_bgcolor="#f8fafc",
 )
 
 # Card wrapper
@@ -487,14 +474,11 @@ def go_country_page(iso3: str, country_name: str = ""):
 clicked_iso3 = None
 if events:
     e = events[0]
+    # For go.Choropleth, Plotly still provides 'location'
     if "location" in e and isinstance(e["location"], str):
         clicked_iso3 = e["location"].upper()
     elif "customdata" in e and isinstance(e["customdata"], list) and len(e["customdata"]) >= 2:
         clicked_iso3 = str(e["customdata"][1]).upper()
-    elif "pointNumber" in e:
-        pn = e["pointNumber"]
-        if isinstance(pn, int) and 0 <= pn < len(all_countries):
-            clicked_iso3 = str(all_countries.iloc[pn]["iso3"]).upper()
 
 if clicked_iso3:
     if clicked_iso3 in iso_with_data:
