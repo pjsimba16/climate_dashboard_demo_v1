@@ -16,6 +16,18 @@ except Exception:
     plotly_events = None
     PLOTLY_EVENTS_AVAILABLE = False
 
+with st.sidebar.expander("🧰 Environment", expanded=False):
+    import sys, platform
+    import plotly
+    st.write("Python:", sys.version)
+    st.write("Platform:", platform.platform())
+    st.write("plotly:", plotly.__version__)
+    try:
+        import streamlit_plotly_events as spe
+        st.write("streamlit-plotly-events:", getattr(spe, "__version__", "unknown"))
+    except Exception as e:
+        st.write("streamlit-plotly-events: not importable", str(e))
+
 # =========================
 # Page & global style
 # =========================
