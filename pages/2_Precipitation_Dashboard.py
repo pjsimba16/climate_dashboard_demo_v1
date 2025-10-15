@@ -6,6 +6,14 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 
+# Click-events package (fallback to plain plotly_chart if unavailable)
+try:
+    from streamlit_plotly_events import plotly_events
+    PLOTLY_EVENTS_AVAILABLE = True
+except Exception:
+    plotly_events = None
+    PLOTLY_EVENTS_AVAILABLE = False
+
 # =========================
 # Page defaults
 # =========================
@@ -25,18 +33,27 @@ def _find_file(rel_path: str):
             return p
     return None
 
-@st.cache_data(show_spinner=False)
-def _read_csv(fname: str) -> pd.DataFrame:
-    p = _find_file(fname)
-    if not p:
-        return pd.DataFrame()
-    try:
-        return pd.read_csv(p)
-    except Exception:
-        try:
-            return pd.read_csv(p, encoding="latin-1")
-        except Exception:
-            return pd.DataFrame()
+def _read_table(name_or_path: str) -> pd.DataFrame:
+    stem = os.path.splitext(name_or_path)[0]
+    for ext in (".snappy.parquet", ".zstd.parquet", ".parquet"):
+        for base in ("parquet", "."):
+            candidate = os.path.join(base, f"{stem}{ext}")
+            if os.path.exists(candidate):
+                try:
+                    return pd.read_parquet(candidate, engine="pyarrow")
+                except Exception:
+                    pass
+    for ext in (".csv",):
+        p = _find_file(stem + ext)
+        if p:
+            try:
+                return pd.read_csv(p)
+            except Exception:
+                try:
+                    return pd.read_csv(p, encoding="latin-1")
+                except Exception:
+                    pass
+    return pd.DataFrame()
 
 try:
     import pycountry
@@ -68,10 +85,8 @@ def _iso3_col(df: pd.DataFrame):
 # Nav helpers
 # =========================
 def go_home():
-    try:
-        st.query_params.clear()
-    except Exception:
-        pass
+    try: st.query_params.clear()
+    except Exception: pass
     try:
         st.switch_page("Home_Page.py")
     except Exception:
@@ -85,119 +100,42 @@ with col_back:
     if st.button("← Home"):
         go_home()
 
-def _find_file(rel_path: str):
-    for base in (".", "data"):
-        p = os.path.join(base, rel_path)
-        if os.path.exists(p):
-            return p
-    return None
-
-def _read_table(name_or_path: str) -> pd.DataFrame:
-    """
-    Smart reader:
-      - If user passes 'country_temperature.csv' → try parquet/country_temperature.parquet (snappy or zstd) first, else CSV file.
-      - If user passes 'country_temperature' (no ext) → same behavior.
-    Looks in './parquet' first, then in '.' and './data'.
-    """
-    stem = os.path.splitext(name_or_path)[0]  # strip extension if any, e.g., 'country_temperature'
-    # 1) Try Parquet in ./parquet (snappy -> zstd)
-    for ext in (".snappy.parquet", ".zstd.parquet", ".parquet"):
-        for base in ("parquet", "."):
-            candidate = os.path.join(base, f"{stem}{ext}")
-            if os.path.exists(candidate):
-                try:
-                    return pd.read_parquet(candidate, engine="pyarrow")
-                except Exception:
-                    pass
-    # 2) Try CSV in '.' or './data'
-    for ext in (".csv",):
-        p = _find_file(stem + ext)
-        if p:
-            try:
-                return pd.read_csv(p)
-            except Exception:
-                try:
-                    return pd.read_csv(p, encoding="latin-1")
-                except Exception:
-                    pass
-    # If all fails
-    return pd.DataFrame()
-
-# --- Hugging Face data loader for Streamlit ---
-# Usage:
-#   df = read_hf_table("country_temperature.parquet")
-#   dfs = load_many_from_hf({
-#       "country_temp": "country_temperature.parquet",
-#       "country_pr":   "country_precipitation.parquet",
-#       "city_temp":    "city_temperature.parquet",
-#       "city_pr":      "city_precipitation.parquet",
-#       "city_mapper":  "city_mapper_with_coords_v2.csv",
-#   })
-
+# --- Hugging Face data loader ---
 from pathlib import Path
-from typing import Dict, Iterable, Optional
-
-import pandas as pd
-import streamlit as st
+from typing import Dict
 from huggingface_hub import hf_hub_download
 try:
     from huggingface_hub.utils import HfHubHTTPError
 except ImportError:
     from huggingface_hub.errors import HfHubHTTPError
 
-
-
-# Your Space slug (repo ID)
 HF_REPO_ID = "pjsimba16/adb_climate_dashboard_v1"
-HF_REPO_TYPE = "space"  # <- important when files live in a Space (not a Datasets repo)
-
+HF_REPO_TYPE = "space"
 
 def _get_hf_token():
-    """
-    Return an HF token if one is configured, else None.
-    Works locally even when no secrets.toml exists.
-    """
-    # 1) Prefer Streamlit secrets if available (e.g., on Streamlit Cloud)
     try:
-        # Accessing st.secrets can raise if there's no secrets.toml
         if hasattr(st, "secrets") and "HF_TOKEN" in st.secrets:
             return st.secrets["HF_TOKEN"]
     except Exception:
         pass
-
-    # 2) Fallback: environment variable (optional)
     return os.getenv("HF_TOKEN", None)
-
 
 @st.cache_data(ttl=24 * 3600, show_spinner=False)
 def _download_from_hub(filename: str,
                        repo_id: str = HF_REPO_ID,
                        repo_type: str = HF_REPO_TYPE) -> str:
-    """
-    Download a single file from the Hugging Face Hub and return its local cached path.
-    Caches across reruns thanks to HF cache + st.cache_data.
-    """
     token = _get_hf_token()
     try:
-        local_path = hf_hub_download(
+        return hf_hub_download(
             repo_id=repo_id,
             repo_type=repo_type,
             filename=filename,
             token=token,
         )
     except HfHubHTTPError as e:
-        raise FileNotFoundError(
-            f"Could not download '{filename}' from '{repo_id}' ({repo_type}). "
-            f"HTTP error: {e}"
-        )
-    return local_path
-
+        raise FileNotFoundError(f"Could not download '{filename}' from '{repo_id}' ({repo_type}). HTTP: {e}")
 
 def _read_any_table(local_path: str, **read_kwargs) -> pd.DataFrame:
-    """
-    Read a tabular file based on extension.
-    Supports: .parquet, .csv, .feather, .json (records/lines), .tsv
-    """
     ext = Path(local_path).suffix.lower()
     if ext == ".parquet":
         return pd.read_parquet(local_path, **read_kwargs)
@@ -207,82 +145,34 @@ def _read_any_table(local_path: str, **read_kwargs) -> pd.DataFrame:
     if ext == ".feather":
         return pd.read_feather(local_path, **read_kwargs)
     if ext == ".json":
-        # Try JSON lines first; fall back to standard JSON
         try:
             return pd.read_json(local_path, lines=True, **read_kwargs)
         except ValueError:
             return pd.read_json(local_path, **read_kwargs)
     raise ValueError(f"Unsupported file extension for '{local_path}'")
 
+@st.cache_data(ttl=24 * 3600)
+def read_hf_table(filename: str) -> pd.DataFrame:
+    return _read_any_table(_download_from_hub(filename))
 
 @st.cache_data(ttl=24 * 3600)
-def read_hf_table(filename: str,
-                  repo_id: str = HF_REPO_ID,
-                  repo_type: str = HF_REPO_TYPE,
-                  **read_kwargs) -> pd.DataFrame:
-    """
-    High-level helper: download a file from HF Hub (Space or Dataset) and return a DataFrame.
-
-    Parameters
-    ----------
-    filename : str
-        File path inside the repo (e.g., 'country_temperature.parquet').
-    repo_id : str
-        HF repo id, default is your Space 'pjsimba16/adb_climate_dashboard_v1'.
-    repo_type : str
-        'space' (your case) or 'dataset' (if you later move data into a Datasets repo).
-    **read_kwargs :
-        Extra kwargs for pandas readers (e.g., dtype=..., usecols=..., engine=...).
-
-    Returns
-    -------
-    pd.DataFrame
-    """
-    local_path = _download_from_hub(filename, repo_id=repo_id, repo_type=repo_type)
-    return _read_any_table(local_path, **read_kwargs)
-
-
-@st.cache_data(ttl=24 * 3600)
-def load_many_from_hf(files: Dict[str, str],
-                      repo_id: str = HF_REPO_ID,
-                      repo_type: str = HF_REPO_TYPE,
-                      **read_kwargs) -> Dict[str, pd.DataFrame]:
-    """
-    Convenience: load multiple files at once.
-
-    files : mapping of {key: filename}
-        Example: {'country_temp': 'country_temperature.parquet', ...}
-    Returns mapping {key: DataFrame}
-    """
-    out = {}
-    for key, fname in files.items():
-        out[key] = read_hf_table(fname, repo_id=repo_id, repo_type=repo_type, **read_kwargs)
-    return out
-
+def load_many_from_hf(files: Dict[str, str]) -> Dict[str, pd.DataFrame]:
+    return {k: read_hf_table(v) for k, v in files.items()}
 
 st.markdown("### Country Dashboard — Precipitation")
 
 # =========================
 # Load precipitation data (cached)
 # =========================
-#df_country_temp = _read_csv("country_temperature.csv")
-#df_city_temp = _read_csv("city_temperature.csv")
-#df_mapper = _read_csv("city_mapper_with_coords_v2.csv")
-
-#df_country_temp = _read_table("country_temperature.csv")
-#df_city_temp = _read_table("city_temperature.csv")
-#df_mapper = _read_table("city_mapper_with_coords_v2.csv")
-
 FILES = {
     "country_pr":   "country_precipitation.snappy.parquet",
     "city_pr":      "city_precipitation.snappy.parquet",
     "city_mapper":  "city_mapper_with_coords_v2.snappy.parquet",
 }
-
 dfs = load_many_from_hf(FILES)
-df_country_p   = dfs["country_pr"]
-df_city_p     = dfs["city_pr"]
-df_mapper     = dfs["city_mapper"]
+df_country_p = dfs["country_pr"]
+df_city_p    = dfs["city_pr"]
+df_mapper    = dfs["city_mapper"]
 
 # =========================
 # ISO3 selection (URL/session + dropdown)
@@ -291,7 +181,6 @@ qp = st.query_params or {}
 iso3_in = str(qp.get("iso3", "")) if ("iso3" in qp) else str(st.session_state.get("nav_iso3", ""))
 iso3_in = iso3_in.upper().strip()
 
-# Build ISO3 list from data files
 iso_set = set()
 for df in (df_country_p, df_city_p, df_mapper):
     if df is None or df.empty:
@@ -313,7 +202,6 @@ new_iso = st.selectbox(
     index=(iso_list.index(current) if iso_list and current in iso_list else 0)
 )
 
-# If user changes country, update URL and rerun (stay on this page)
 if new_iso and new_iso != iso3_in:
     try:
         st.query_params.update({"page": "2 Precipitation Dashboard", "iso3": new_iso})
@@ -360,7 +248,6 @@ def _mapper_for_iso(df_map_all: pd.DataFrame, iso3_val: str, city_col: str, lat_
         return pd.DataFrame()
     return dm.dropna(subset=[lat_c, lon_c])
 
-# Derive columns needed from mapper
 lat_col = next((c for c in df_mapper.columns if c.strip().lower() in {"lat","latitude"}), None) if not df_mapper.empty else None
 lon_col = next((c for c in df_mapper.columns if c.strip().lower() in {"lon","lng","longitude"}), None) if not df_mapper.empty else None
 city_map_col = next((c for c in df_mapper.columns if c.strip().lower() in {"city","region","province","state","admin1"}), None) if not df_mapper.empty else None
@@ -371,7 +258,7 @@ if not df_map.empty and city_map_col and cities_with_data:
     df_map = df_map[df_map[city_map_col].astype(str).map(_norm).isin(cities_with_data)]
 
 # =========================
-# Layout (narrower left: map + indicator; wider right: options + charts)
+# Layout
 # =========================
 left, right = st.columns([0.25, 0.75], gap="large")
 
@@ -388,28 +275,20 @@ with left:
     fig_map.update_layout(coloraxis_showscale=False, margin=dict(l=0,r=0,t=0,b=0), height=340)
     fig_map.update_geos(fitbounds="locations", visible=False)
 
-    # Add city markers (red) if available
-    city_order = []
     if not df_map.empty and city_map_col and lat_col and lon_col:
-        city_order = df_map[city_map_col].astype(str).map(_norm).tolist()
         fig_map.add_trace(go.Scattergeo(
             lon=df_map[lon_col],
             lat=df_map[lat_col],
             mode="markers",
+            name="Cities",
             marker=dict(size=8, color="red", line=dict(width=0.5, color="#333")),
             text=df_map[city_map_col].astype(str),
+            customdata=df_map[city_map_col].astype(str),
             hovertemplate="%{text}<extra></extra>",
-            name="Cities"
         ))
 
-    # Clickable map for city selection
-    try:
-        from streamlit_plotly_events import plotly_events
-    except Exception:
-        plotly_events = None
-
     clicked_city = None
-    if plotly_events is not None:
+    if PLOTLY_EVENTS_AVAILABLE:
         ev = plotly_events(
             fig_map,
             click_event=True,
@@ -418,18 +297,22 @@ with left:
             override_height=340,
             override_width="100%"
         )
-        if ev:
-            curve = ev[0].get("curveNumber")
-            if curve == 1 and city_order:
-                pn = ev[0].get("pointNumber", ev[0].get("pointIndex"))
-                if isinstance(pn, int) and 0 <= pn < len(city_order):
-                    clicked_city = city_order[pn]
     else:
-        st.plotly_chart(fig_map, use_container_width=True, theme=None)
+        st.plotly_chart(fig_map, use_container_width=True, config={"displayModeBar": False})
+        ev = []
+
+    if ev:
+        e0 = ev[0]
+        if "customdata" in e0 and isinstance(e0["customdata"], (str, list)):
+            clicked_city = e0["customdata"] if isinstance(e0["customdata"], str) else e0["customdata"][0]
+        elif "text" in e0 and isinstance(e0["text"], str):
+            clicked_city = e0["text"]
+        elif "pointNumber" in e0 and not df_map.empty:
+            pn = e0["pointNumber"]
+            if isinstance(pn, int) and 0 <= pn < len(df_map):
+                clicked_city = str(df_map.iloc[pn][city_map_col])
 
     st.markdown("#### Select Climate Indicator:")
-
-    # Same fixed order across all pages
     INDICATOR_OPTIONS = [
         "Temperature",
         "Precipitation",
@@ -441,17 +324,14 @@ with left:
         "Humidity",
         "Windspeeds",
     ]
-
     current_indicator = "Precipitation"
     sel_indicator = st.radio(
         "Select one indicator",
         options=INDICATOR_OPTIONS,
         index=INDICATOR_OPTIONS.index(current_indicator)
     )
-
     st.caption("Temperature and Precipitation are implemented; others are placeholders.")
 
-    # Navigate only if user changed the selection
     if sel_indicator != current_indicator and sel_indicator == "Temperature":
         try:
             st.switch_page("pages/1_Temperature_Dashboard.py")
@@ -460,17 +340,14 @@ with left:
                 st.query_params.update({"page": "1 Temperature Dashboard", "iso3": iso3})
                 st.rerun()
 
-
 # ---------- RIGHT ----------
 with right:
     st.markdown("#### Options")
 
-    # --- ACTIVE state used by charts ---
     if "prec_active_ds"   not in st.session_state: st.session_state["prec_active_ds"]   = "Historical Observations"
     if "prec_active_freq" not in st.session_state: st.session_state["prec_active_freq"] = "Monthly"
     if "prec_active_src"  not in st.session_state: st.session_state["prec_active_src"]  = "ERA5"
 
-    # ------- FORM: no rerun until Apply -------
     with st.form(key="prec_options_form", clear_on_submit=False):
         fc1, fc2, fc3 = st.columns([1, 1, 1], gap="small")
         with fc1:
@@ -497,10 +374,8 @@ with right:
                 horizontal=True,
                 key="prec_form_src"
             )
-
         apply_clicked = st.form_submit_button("Apply changes", type="primary")
 
-    # Commit on Apply (no explicit st.rerun())
     if apply_clicked:
         changed = (
             pending_ds   != st.session_state["prec_active_ds"] or
@@ -514,15 +389,18 @@ with right:
         else:
             st.info("No changes to apply.", icon="ℹ️")
 
-    # ------- City selector (right under Options) -------
+    # City selector (sync with clicks)
+    cities_with_data = cities_with_data or []
     city_options = ["Country (all)"] + cities_with_data
     if "opt_city" not in st.session_state or st.session_state["opt_city"] not in city_options:
         st.session_state["opt_city"] = city_options[0]
+    if clicked_city and clicked_city in city_options and st.session_state["opt_city"] != clicked_city:
+        st.session_state["opt_city"] = clicked_city
     sel_city = st.selectbox("Select Province/City/State", options=city_options, key="opt_city")
 
     st.markdown("---")
 
-    # ------- Active-choice badges -------
+    # Active-choice badges
     st.markdown(
         f"""<div style="margin-bottom:8px">
                 <span style="display:inline-block;padding:2px 8px;border-radius:999px;background:#eef2ff;
@@ -541,11 +419,8 @@ with right:
         unsafe_allow_html=True
     )
 
-
-
-
     # =========================
-    # Series builders (Sum + Variance) — cached
+    # Series builders (Sum + Var)
     # =========================
     @st.cache_data(show_spinner=False)
     def _country_series_p(df_country: pd.DataFrame, iso3_val: str) -> pd.DataFrame:
@@ -599,9 +474,7 @@ with right:
         st.warning("No precipitation data found for this selection.")
         st.stop()
 
-    # =========================
     # Date range slider
-    # =========================
     dmin, dmax = series["date"].min(), series["date"].max()
     date_from, date_to = st.slider(
         "Date range",
@@ -613,9 +486,7 @@ with right:
     mask = (series["date"] >= pd.to_datetime(date_from)) & (series["date"] <= pd.to_datetime(date_to))
     series = series.loc[mask].reset_index(drop=True)
 
-    # =========================
     # Chart helper (sum + variance on secondary axis)
-    # =========================
     def chart_sum_var(title: str, s: pd.DataFrame):
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=s["date"], y=s["sum"], mode="lines", name="Precipitation (sum)"))
@@ -626,10 +497,7 @@ with right:
                           title=title, xaxis_title="Date", yaxis_title="mm")
         return fig
 
-    # =========================
-    # 2×2 grid (you can tune later):
-    #   Total Precip, Intensity (placeholder), Wet Days (placeholder), Dry Days (placeholder)
-    # =========================
+    # 2×2 grid (placeholders included)
     g1, g2 = st.columns(2)
     with g1:
         st.plotly_chart(chart_sum_var("Total Precipitation", series), use_container_width=True)
@@ -644,9 +512,7 @@ with right:
 
     st.markdown("—")
 
-    # =========================
-    # Percentiles (10–90) for precipitation sum
-    # =========================
+    # Percentiles
     pct = st.slider("Select percentile for the charts below", min_value=10, max_value=90, value=50, step=1, key="p_pct")
 
     def percentile_series(s: pd.DataFrame, val_col: str, pct_value: int) -> pd.DataFrame:
