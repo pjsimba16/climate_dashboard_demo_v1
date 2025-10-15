@@ -118,6 +118,65 @@ def _read_availability_snapshot():
                 pass
     return None
 
+# --- availability snapshot loader: local first, then HF fallback ---
+import os
+from pathlib import Path
+
+def _read_availability_snapshot_local():
+    """Look for the snapshot next to this file and in common folders."""
+    here = Path(__file__).parent.resolve()
+    candidates = [
+        here / "availability_snapshot.parquet",  # <-- same folder as Home_Page.py
+        here / "data" / "availability_snapshot.parquet",
+        here / "parquet" / "availability_snapshot.parquet",
+        here / "availability_snapshot.csv",
+        here / "data" / "availability_snapshot.csv",
+    ]
+    for p in candidates:
+        if p.exists():
+            try:
+                snap = pd.read_parquet(p) if p.suffix.lower() == ".parquet" else pd.read_csv(p)
+                st.caption(f"Loaded availability snapshot from: {p}")
+                return snap
+            except Exception as e:
+                st.caption(f"Found snapshot at {p} but failed to read: {e}")
+    return None
+
+@st.cache_data(ttl=24*3600, show_spinner=False)
+def _read_availability_snapshot_hf(
+    filename_parquet="availability_snapshot.parquet",
+    filename_csv="availability_snapshot.csv",
+    repo_id=HF_REPO_ID,
+    repo_type=HF_REPO_TYPE,
+):
+    """Try to pull the snapshot from Hugging Face if it's not bundled."""
+    token = _get_hf_token()
+    # Prefer parquet in /parquet/
+    try:
+        p = hf_hub_download(repo_id=repo_id, repo_type=repo_type,
+                            filename=f"parquet/{filename_parquet}", token=token)
+        return pd.read_parquet(p)
+    except Exception:
+        pass
+    # Fallback to CSV in /data/ or repo root
+    for fname in (f"data/{filename_csv}", filename_csv):
+        try:
+            p = hf_hub_download(repo_id=repo_id, repo_type=repo_type, filename=fname, token=token)
+            return pd.read_csv(p)
+        except Exception:
+            continue
+    return None
+
+def _load_availability_snapshot():
+    snap = _read_availability_snapshot_local()
+    if snap is not None:
+        return snap, "snapshot (local)"
+    snap = _read_availability_snapshot_hf()
+    if snap is not None:
+        return snap, "snapshot (HF)"
+    return None, None
+
+
 # --- Hugging Face data loader (unchanged behavior, just organized) ---
 from pathlib import Path
 from typing import Dict
@@ -197,32 +256,31 @@ st.divider()
 # =========================
 # Load availability (prefer snapshot; else compute from HF datasets)
 # =========================
-snap = _read_availability_snapshot()
+# =========================
+# Load availability (prefer snapshot; else compute from HF datasets)
+# =========================
+snap, snap_origin = _load_availability_snapshot()
 
 if snap is not None and {"iso3","has_temp","has_prec"} <= set(snap.columns):
-    # --- Fast path: use snapshot; do NOT load the big tables here ---
+    # Fast path: use snapshot; skip heavy downloads on Home
     iso_temp = set(snap.loc[snap["has_temp"] == 1, "iso3"].astype(str).str.upper())
     iso_prec = set(snap.loc[snap["has_prec"] == 1, "iso3"].astype(str).str.upper())
     iso_with_data = iso_temp | iso_prec
-
-    # Optional: if you still need the mapper later on the home page, load it;
-    # otherwise skip all large downloads on Home to keep it fast.
+    # (Keep placeholders so later code that references these names doesn't break)
     country_temp = country_prec = city_temp = city_prec = pd.DataFrame()
 else:
-    # --- Fallback: compute from the HF datasets (your current behavior) ---
+    # Fallback: compute availability from HF datasets (slower)
     FILES = {
         "country_temp": "country_temperature.snappy.parquet",
         "country_pr":   "country_precipitation.snappy.parquet",
         "city_temp":    "city_temperature.snappy.parquet",
         "city_pr":      "city_precipitation.snappy.parquet",
-        "city_mapper":  "city_mapper_with_coords_v2.snappy.parquet",
     }
     dfs = load_many_from_hf(FILES)
     country_temp = dfs["country_temp"]
     country_prec = dfs["country_pr"]
     city_temp    = dfs["city_temp"]
     city_prec    = dfs["city_pr"]
-    # df_mapper    = dfs["city_mapper"]  # Not needed on Home
 
     def _isos_with_indicator(country_df, city_df):
         s = set()
@@ -239,8 +297,17 @@ else:
 
     iso_temp = _isos_with_indicator(country_temp, city_temp)
     iso_prec = _isos_with_indicator(country_prec, city_prec)
-    iso_with_data = set().union(iso_temp, iso_prec)
+    iso_with_data = iso_temp | iso_prec
+    snap_origin = "computed (HF)"
 
+# Small badge so you can confirm which path was used
+st.caption(f"Availability source: {snap_origin or 'computed (HF)'}")
+
+with st.sidebar.expander("⚙️ Availability debug", expanded=False):
+    st.write("iso_temp:", len(iso_temp))
+    st.write("iso_prec:", len(iso_prec))
+    st.write("iso_with_data:", len(iso_with_data))
+    st.write("origin:", snap_origin)
 
 # All countries for the map
 if pycountry:
