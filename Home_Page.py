@@ -3,9 +3,10 @@ import os
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
-import plotly.express as px  # still used for nothing else, but safe to keep
+import plotly.express as px  # kept for convenience
 import streamlit.components.v1 as components
 from pathlib import Path
+from typing import Dict
 
 # Try to use the click-events package; fall back gracefully if unavailable
 try:
@@ -99,7 +100,6 @@ def _iso3_col(df: pd.DataFrame):
     return None
 
 # --- Hugging Face data loader ---
-from typing import Dict
 from huggingface_hub import hf_hub_download
 try:
     from huggingface_hub.utils import HfHubHTTPError
@@ -299,7 +299,7 @@ all_countries["hovertext"] = all_countries.apply(
               else (f"{r['name']}<br><span>No available indicators</span>"),
     axis=1
 )
-all_countries["val"]  = all_countries["has_data"].astype("int8")  # 0/1
+all_countries["val"]  = all_countries["has_data"].astype("float")  # ensure float for z
 
 # Optional color debug
 with st.sidebar.expander("🎨 Color debug", expanded=False):
@@ -344,7 +344,7 @@ with col_b:
             st.info(f"{chosen}: No available indicators.", icon="ℹ️")
 
 # =========================
-# Dynamic sizing: read viewport (single value; no loops)
+# Dynamic sizing
 # =========================
 vp = components.html(
     """
@@ -369,14 +369,13 @@ else:
     map_h = 720
 
 # =========================
-# World map using go.Choropleth (explicit zmin/zmax)
+# World map using go.Choropleth (geo is VISIBLE on Cloud)
 # =========================
 fig = go.Figure()
 
-# Choropleth layer
 fig.add_trace(go.Choropleth(
     locations=all_countries["iso3"],
-    z=all_countries["val"].astype(float),  # numeric 0/1
+    z=all_countries["val"],                  # 0.0/1.0
     locationmode="ISO-3",
     colorscale=[[0.0, "#d4d4d8"], [1.0, "#12a39a"]],
     zmin=0.0, zmax=1.0,
@@ -390,10 +389,11 @@ fig.add_trace(go.Choropleth(
     marker_line_width=1.2,
 ))
 
-# Geo & layout styling
+# IMPORTANT: keep the geo VISIBLE and scoped to the world
 fig.update_geos(
-    fitbounds="locations",
-    visible=False,
+    scope="world",
+    showframe=False,
+    showcoastlines=False,
     showcountries=True,
     countrycolor="#475569",
     countrywidth=1.2,
@@ -401,8 +401,8 @@ fig.update_geos(
     oceancolor="#eef2f7",
     showland=True,
     landcolor="#f8fafc",
-    showsubunits=False
 )
+
 fig.update_layout(
     height=map_h,
     margin=dict(l=0, r=0, t=0, b=0),
@@ -474,7 +474,6 @@ def go_country_page(iso3: str, country_name: str = ""):
 clicked_iso3 = None
 if events:
     e = events[0]
-    # For go.Choropleth, Plotly still provides 'location'
     if "location" in e and isinstance(e["location"], str):
         clicked_iso3 = e["location"].upper()
     elif "customdata" in e and isinstance(e["customdata"], list) and len(e["customdata"]) >= 2:
